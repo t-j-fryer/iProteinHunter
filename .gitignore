@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venvs/
+.env
+.venv
+
+# Outputs
+output/
+protein_hunter_runs/
+
+# OS junk
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
