@@ -11,11 +11,15 @@ PYTHON_BIN="python3.11"
 
 BOLTZ_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_boltz"
 LIGAND_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_ligandmpnn"
+INTELLIFOLD_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_intellifold"
+OPENFOLD_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_openfold3_mlx"
 
 SRC_DIR="${IPROTEINHUNTER_ROOT}/src"
 LIGANDMPNN_REPO="${SRC_DIR}/LigandMPNN"
+INTELLIFOLD_REPO="${SRC_DIR}/IntelliFold"
+OPENFOLD_REPO="${SRC_DIR}/openfold-3-mlx"
 
-RUNNER="${IPROTEINHUNTER_ROOT}/iProteinHunter_run.sh"
+RUNNER="${IPROTEINHUNTER_ROOT}/iproteinhunter_run.sh"
 
 ########################################
 # Preflight
@@ -101,6 +105,38 @@ else
 fi
 
 ########################################
+# Clone IntelliFold (upstream)
+########################################
+
+if [[ ! -d "${INTELLIFOLD_REPO}" ]]; then
+  git clone https://github.com/IntelliGen-AI/IntelliFold.git "${INTELLIFOLD_REPO}"
+else
+  echo "IntelliFold repo already exists, updating..."
+  git -C "${INTELLIFOLD_REPO}" pull --ff-only
+fi
+
+########################################
+# Clone openfold-3-mlx
+########################################
+
+if [[ ! -d "${OPENFOLD_REPO}" ]]; then
+  git clone https://github.com/latent-spacecraft/openfold-3-mlx.git "${OPENFOLD_REPO}"
+else
+  echo "openfold-3-mlx repo already exists, updating..."
+  if git -C "${OPENFOLD_REPO}" rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
+    git -C "${OPENFOLD_REPO}" pull --ff-only
+  else
+    git -C "${OPENFOLD_REPO}" fetch origin
+    if git -C "${OPENFOLD_REPO}" show-ref --verify --quiet refs/remotes/origin/main; then
+      git -C "${OPENFOLD_REPO}" branch --set-upstream-to=origin/main >/dev/null 2>&1 || true
+      git -C "${OPENFOLD_REPO}" pull --ff-only || true
+    else
+      echo "⚠️  Warning: origin/main not found; skipping pull for openfold-3-mlx"
+    fi
+  fi
+fi
+
+########################################
 # Filter LigandMPNN requirements (no CUDA)
 ########################################
 
@@ -122,17 +158,17 @@ mkdir -p "${MODEL_DIR}"
 
 echo "==> Downloading LigandMPNN weights..."
 
-python - <<'PY'
-import urllib.request, os, pathlib
+python - "${MODEL_DIR}" <<'PY'
+import sys, urllib.request, pathlib
 
 urls = {
   "proteinmpnn_v_48_020.pt":
     "https://files.ipd.uw.edu/pub/ligandmpnn/proteinmpnn_v_48_020.pt",
-  "ligandmpnn_v_32_010.pt":
-    "https://files.ipd.uw.edu/pub/ligandmpnn/ligandmpnn_v_32_010.pt",
+  "ligandmpnn_v_32_010_25.pt":
+    "https://files.ipd.uw.edu/pub/ligandmpnn/ligandmpnn_v_32_010_25.pt",
 }
 
-outdir = pathlib.Path(os.environ["MODEL_DIR"])
+outdir = pathlib.Path(sys.argv[1])
 for name, url in urls.items():
     path = outdir / name
     if path.exists():
@@ -145,6 +181,66 @@ PY
 deactivate
 
 ########################################
+# IntelliFold venv
+########################################
+
+echo
+echo "==> Installing IntelliFold env..."
+
+if [[ ! -d "${INTELLIFOLD_VENV}" ]]; then
+  "${PYTHON_BIN}" -m venv "${INTELLIFOLD_VENV}"
+fi
+
+source "${INTELLIFOLD_VENV}/bin/activate"
+
+pip install --upgrade pip
+
+# Torch for Apple Silicon (MPS)
+pip install torch==2.6.0
+
+# Install IntelliFold (editable) without CUDA-only deps
+pip install -e "${INTELLIFOLD_REPO}" --no-deps
+
+# Runtime deps (no CUDA/DeepSpeed)
+pip install \
+  accelerate==1.1.1 biopython==1.85 click==8.1.8 \
+  einops==0.8.0 einx==0.3.0 ihm==2.5 mashumaro==3.14 \
+  ml_collections==1.0.0 modelcif==1.2 networkx==3.4.2 \
+  numba==0.61.0 numpy==1.24.0 pandas==2.2.3 pyyaml==6.0.2 \
+  rdkit==2024.3.2 requests==2.32.3 scipy==1.14.1 \
+  torchdiffeq==0.2.5 tqdm==4.67.1 fsspec==2025.3.0
+
+python - <<'PY'
+import torch
+print(f"torch: {torch.__version__} | MPS available: {torch.backends.mps.is_available()}")
+PY
+
+deactivate
+
+########################################
+# openfold-3-mlx venv
+########################################
+
+echo
+echo "==> Installing openfold-3-mlx env..."
+
+if [[ ! -d "${OPENFOLD_VENV}" ]]; then
+  "${PYTHON_BIN}" -m venv "${OPENFOLD_VENV}"
+fi
+
+source "${OPENFOLD_VENV}/bin/activate"
+
+pip install --upgrade pip
+
+# Torch for Apple Silicon (MPS)
+pip install torch==2.6.0
+
+# Install openfold-3-mlx (editable)
+pip install -e "${OPENFOLD_REPO}"
+
+deactivate
+
+########################################
 # Make runner executable
 ########################################
 
@@ -153,7 +249,7 @@ echo "==> Finalizing install..."
 
 if [[ -f "${RUNNER}" ]]; then
   chmod +x "${RUNNER}"
-  echo "✓ Made iProteinHunter_run.sh executable"
+  echo "✓ Made $(basename "${RUNNER}") executable"
 else
   echo "⚠️  Warning: ${RUNNER} not found"
 fi

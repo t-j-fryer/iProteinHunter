@@ -1,0 +1,10 @@
+sequences:
+  - protein:
+      id: A
+      sequence: 
+      msa: empty 
+  - ligand:
+      id: B
+      smiles: 'CC1(C)C2=CC(S(=O)([O-])=O)=CC=C2N(CCCCCC(=O)O)/C1=C/C=C4CCCC(/C=C/C5=[N+](CCCCS(=O)([O-])=O)C6=CC=C(S(=O)([O-])=O)C=C6C5(C)C)=C\4OC7=CC=C(S(=O)([O-])=O)C=C7'
+
+version: 1

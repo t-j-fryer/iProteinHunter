@@ -1,0 +1,15 @@
+sequences:
+  - protein:
+      id: A
+      sequence: 
+      msa: empty 
+  - protein:
+      id: B
+      sequence: IRCFITPDITSKDCPNGHVCYTKTWCDAFCSIRGKRVDLGCAATCPTVKTGVDIQCCSTDNCNPFPTRKRP
+constraints:
+ - pocket:
+        binder: A
+        contacts: [[B, 10], [B, 11]]
+        max_distance: 6
+        force: true # if force is set to true (default is false), a potential will be used to enforce the pocket constraint]
+version: 1

@@ -1,57 +1,38 @@
-
 # iProteinHunter
 
-**iProteinHunter** is a local, reproducible pipeline for iterative protein binder design using
-**Boltz** (structure prediction & confidence scoring) and **LigandMPNN** (sequence redesign).
+iProteinHunter is a local iterative binder-design pipeline for Apple Silicon that combines:
 
-It is designed to:
+- structure prediction (`boltz`, `intellifold`, or `openfold-3-mlx`)
+- sequence redesign (`LigandMPNN`)
+- optional post-prediction scoring with one or more secondary predictors
 
-* run **locally on Apple Silicon (macOS)**
-* avoid CUDA and PATH pollution
-* use **explicit virtual environments**
-* be driven by a **single orchestration script**
+The main runner is:
 
-This makes it suitable for long-running design sweeps, unattended runs, and reproducible methods.
+- `iproteinhunter_run.sh`
 
 ---
 
-## Features
+## What is committed vs local-only
 
-* Iterative binder design loop (Boltz → LigandMPNN → Boltz)
-* Per-run and per-cycle tracking of iPTM scores
-* Automatic reuse of target MSAs across cycles
-* Fully local installation (no Docker, no Conda required)
-* Deterministic environment setup via a single installer
-* One command to run full experiments
+This repo is set up so GitHub can stay clean:
 
----
+- committed: core runner, installer, source integration, example YAMLs
+- local-only (gitignored): `output/`, `venvs/`, RAM test assets, benchmarking/campaign helper scripts, and other local experiment artifacts
 
-## Repository structure
-
-```
-iProteinHunter/
-├── install_iProteinHunter.sh     # One-time installer
-├── iProteinHunter_run.sh         # Main pipeline runner
-├── examples/                     # Example Boltz YAML templates
-├── src/
-│   └── LigandMPNN/               # Cloned by installer
-├── venvs/                        # Python virtual environments (gitignored)
-├── output/                       # Run outputs (gitignored)
-└── README.md
-```
+If you run `git add -A`, ignored folders/files are not staged.
 
 ---
 
-## Installation
+## Requirements
 
-### Requirements
+- macOS (Apple Silicon recommended)
+- Python `3.11`
+- `git`
+- internet access (MSA server + model/package downloads)
 
-* macOS (Apple Silicon)
-* Python **3.11**
-* `git`
-* Internet access (for model weights + MSAs)
+---
 
-### Install
+## Install
 
 ```bash
 git clone https://github.com/t-j-fryer/iProteinHunter.git
@@ -59,121 +40,114 @@ cd iProteinHunter
 bash install_iProteinHunter.sh
 ```
 
-This will:
+Installer actions:
 
-* create two Python virtual environments
-* install Boltz and LigandMPNN with compatible dependencies
-* download LigandMPNN model weights
-* make `iProteinHunter_run.sh` executable
-
-No PATH changes are made.
+- creates venvs for Boltz, LigandMPNN, IntelliFold, and OpenFold3-MLX
+- clones required repos into `src/`
+- installs dependencies for each tool
+- makes `iproteinhunter_run.sh` executable
 
 ---
 
-## Quick start
+## Quick run example (requested settings)
 
-Run the pipeline using the default example YAML:
+Example using `aCbx_bind.yaml`, auto parallelization, 10 designs, binder length 65-150:
 
 ```bash
-./iProteinHunter_run.sh \
-  --run-name test_run \
-  --num-runs 1 \
-  --num-cycles 3
+caffeinate -dims ./iproteinhunter_run.sh \
+  --predictor boltz \
+  --template-yaml ./examples/aCbx_bind.yaml \
+  --run-name acbx_demo_10 \
+  --num-runs 10 \
+  --num-opt-cycles 5 \
+  --binder-min-len 65 \
+  --binder-max-len 150 \
+  --max-parallel auto
 ```
 
-Outputs will be written to:
+Outputs are written under:
 
-```
-output/test_run/
-```
+- `output/<run-name>/`
 
 ---
 
-## Example: unattended run
+## CLI arguments (`iproteinhunter_run.sh`)
 
-```bash
-caffeinate -dims ./iProteinHunter_run.sh \
-  --template-yaml examples/TEM1.yaml \
-  --run-name binder_sweep \
-  --num-runs 3 \
-  --num-cycles 5
-```
+### Core
 
----
+- `--predictor TOOL` (`boltz | intellifold | openfold-3-mlx`)
+- `--run-name NAME`
+- `--num-runs N`
+- `--num-opt-cycles N` (cycles after `cycle_00`)
+- `--template-yaml PATH`
+- `--out-root PATH`
 
-## Command-line options
+### Binder seed (`cycle_00`)
 
-```
---run-name                  Name of the experiment
---num-runs                  Number of independent runs
---num-cycles                Cycles per run
---template-yaml              Boltz YAML template
---out-root                   Output directory (default: ./output)
---binder-min-len              Minimum binder length
---binder-max-len              Maximum binder length
---binder-percent-x            Percent of X positions in binder
---boltz-extra                 Extra flags passed to Boltz
---ligand-extra                Extra flags passed to LigandMPNN
-```
+- `--binder-min-len N`
+- `--binder-max-len N`
+- `--binder-percent-x P`
 
-For the full list:
+### Anti-helix seed controls
 
-```bash
-./iProteinHunter_run.sh --help
-```
+- `--helix-kill`
+- `--negative-helix-constant X`
+- `--unk-patch-mode ala|ala_gly`
 
----
+### LigandMPNN temperature
 
-## Design philosophy
+- `--ligand-temp-cycle1 T`
+- `--ligand-temp-other T`
 
-iProteinHunter intentionally avoids:
+### Filtering / export
 
-* global PATH modification
-* implicit environment activation
-* hidden background processes
+- `--iptm-threshold T`
 
-Instead:
+### Post-prediction
 
-* all environments are activated explicitly inside the pipeline
-* all paths are deterministic
-* everything needed for a run is visible in one script
+- `--post-predictor TOOL[,TOOL]` (`none | boltz | intellifold | openfold-3-mlx`)
+- `--post-mode MODE` (`all | iptm`)
+- `--post-iptm-threshold T`
+- `--post-include-cycle00`
 
-This makes runs easy to debug, reproduce, and document.
+### Parallelism
 
----
+- `--no-parallel`
+- `--max-parallel N|auto`
+- `--mem-budget-gb X|auto`
+- `--mem-safety S`
+- `--mps-aware`
+- `--no-mps-aware`
+- `--mps-max-parallel N|auto`
+- `--mps-mem-fraction F`
+- `--mps-cpu-cap N`
 
-## Outputs
+### Extra backend flags passthrough
 
-For each run:
+- `--boltz-extra "ARGS"`
+- `--intellifold-extra "ARGS"`
+- `--openfold-extra "ARGS"`
+- `--ligand-extra "ARGS"`
 
-* per-cycle Boltz structures and confidence JSONs
-* redesigned sequences from LigandMPNN
-* CSVs tracking iPTM over cycles
-* summary plots:
+### Help
 
-  * iPTM vs cycle
-  * iPTM vs run (all cycles)
-
-These are written under `output/<run-name>/`.
+- `-h`, `--help`
 
 ---
 
-## Citation
+## Example YAMLs
 
-If you use this pipeline in published work, please cite the original tools:
+Example inputs live in:
 
-* **Boltz**
-* **LigandMPNN**
-
-(Exact citation text coming soon.)
-
----
-
-## Status
-
-This repository is under active development and currently optimized for:
-
-* Apple Silicon macOS
-* local exploratory and large-sweep binder design workflows
+- `examples/aCbx_bind.yaml`
+- `examples/Boltz_Cbx.yaml`
+- `examples/Benchmark.yaml`
+- `examples/iFluor800.yaml`
 
 ---
+
+## Notes
+
+- By default, post-prediction starts after all design runs finish.
+- `--post-mode all` evaluates every designed cycle (except `cycle_00` unless `--post-include-cycle00` is set).
+- MSA caching is handled automatically in the runner for supported predictors.

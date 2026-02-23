@@ -8,9 +8,28 @@ venvs/
 .env
 .venv
 
+# Installed dependency source trees and local launch shims
+src/
+bin/
+
 # Outputs
 output/
 protein_hunter_runs/
+boltz_once_out/
+
+# Local experiments / stress tests / benchmarking (keep local only)
+ram_test.sh
+ram_tests/
+ram_tests_SPH/
+benchmark_parallel_*.sh
+run_bench_parallel_*.sh
+run_finalize_bench_p6.sh
+run_campaign_all_pipelines.sh
+run_remaining_campaign_cases.sh
+summarize_campaign_iptm.py
+iProteinHunter_run_0402.sh
+iProteinHunter_run_copy.sh
+iProteinHunter_run_0802.sh
 
 # OS junk
 .DS_Store
@@ -18,4 +37,3 @@ protein_hunter_runs/
 # Editors
 .vscode/
 .idea/
-
