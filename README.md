@@ -32,9 +32,35 @@ bash install_iProteinHunter.sh
 Installer actions:
 
 - creates venvs for Boltz, LigandMPNN, IntelliFold, and OpenFold3-MLX
+- creates a notebook venv and registers Jupyter kernel `iProteinHunter Notebook`
 - clones required repos into `src/`
 - installs dependencies for each tool
 - makes `iproteinhunter_run.sh` executable
+
+---
+
+## Notebook kernel (recommended)
+
+The installer creates:
+
+- venv: `venvs/iProteinHunter_notebook`
+- Jupyter kernel: `iProteinHunter Notebook`
+
+This is intended for VS Code notebooks (no separate JupyterLab launch required).
+
+In VS Code:
+
+```bash
+# from repo root
+code .
+```
+
+Then open `notebooks/iproteinhunter_pipeline_control.ipynb` and select kernel **iProteinHunter Notebook**.
+
+Recommended VS Code extensions:
+
+- `ms-python.python`
+- `ms-toolsai.jupyter`
 
 ---
 

@@ -13,6 +13,7 @@ BOLTZ_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_boltz"
 LIGAND_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_ligandmpnn"
 INTELLIFOLD_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_intellifold"
 OPENFOLD_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_openfold3_mlx"
+NOTEBOOK_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_notebook"
 
 SRC_DIR="${IPROTEINHUNTER_ROOT}/src"
 LIGANDMPNN_REPO="${SRC_DIR}/LigandMPNN"
@@ -241,6 +242,35 @@ pip install -e "${OPENFOLD_REPO}"
 deactivate
 
 ########################################
+# Notebook venv + kernel
+########################################
+
+echo
+echo "==> Installing notebook env..."
+
+if [[ ! -d "${NOTEBOOK_VENV}" ]]; then
+  "${PYTHON_BIN}" -m venv "${NOTEBOOK_VENV}"
+fi
+
+source "${NOTEBOOK_VENV}/bin/activate"
+
+pip install --upgrade pip
+pip install \
+  ipykernel \
+  ipywidgets \
+  pandas \
+  matplotlib \
+  pyyaml \
+  py2Dmol \
+  py3Dmol
+
+python -m ipykernel install --user \
+  --name iproteinhunter-notebook \
+  --display-name "iProteinHunter Notebook"
+
+deactivate
+
+########################################
 # Make runner executable
 ########################################
 
@@ -267,4 +297,8 @@ echo
 echo "Defaults:"
 echo "  examples/: ${IPROTEINHUNTER_ROOT}/examples"
 echo "  output/:   ${IPROTEINHUNTER_ROOT}/output"
+echo
+echo "Notebook:"
+echo "  Open in VS Code: ${IPROTEINHUNTER_ROOT}/notebooks/iproteinhunter_pipeline_control.ipynb"
+echo "  Select kernel: iProteinHunter Notebook"
 echo

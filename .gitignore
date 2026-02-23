@@ -37,3 +37,6 @@ iProteinHunter_run_0802.sh
 # Editors
 .vscode/
 .idea/
+
+# Notebooks
+.ipynb_checkpoints/
