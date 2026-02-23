@@ -12,17 +12,6 @@ The main runner is:
 
 ---
 
-## What is committed vs local-only
-
-This repo is set up so GitHub can stay clean:
-
-- committed: core runner, installer, source integration, example YAMLs
-- local-only (gitignored): `output/`, `venvs/`, RAM test assets, benchmarking/campaign helper scripts, and other local experiment artifacts
-
-If you run `git add -A`, ignored folders/files are not staged.
-
----
-
 ## Requirements
 
 - macOS (Apple Silicon recommended)
