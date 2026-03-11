@@ -1,0 +1,6 @@
+sequences:
+  - protein:
+      id: A
+      sequence: 
+      msa: empty 
+version: 1

@@ -11,5 +11,5 @@ constraints:
         binder: A
         contacts: [[B, 65]]
         max_distance: 6
-        force: true # if force is set to true (default is false), a potential will be used to enforce the pocket constraint]
+        force: false
 version: 1

@@ -7,7 +7,10 @@ set -euo pipefail
 
 IPROTEINHUNTER_ROOT="${IPROTEINHUNTER_ROOT:-$HOME/iProteinHunter}"
 
-PYTHON_BIN="python3.11"
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+IPROTEINHUNTER_AUTO_BOOTSTRAP_PYTHON311="${IPROTEINHUNTER_AUTO_BOOTSTRAP_PYTHON311:-1}"
+LOCAL_BIN="${HOME}/.local/bin"
+UV_BIN="${LOCAL_BIN}/uv"
 
 BOLTZ_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_boltz"
 LIGAND_VENV="${IPROTEINHUNTER_ROOT}/venvs/iProteinHunter_ligandmpnn"
@@ -26,6 +29,46 @@ RUNNER="${IPROTEINHUNTER_ROOT}/iproteinhunter_run.sh"
 # Preflight
 ########################################
 
+ensure_python311() {
+  if command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v "${PYTHON_BIN}")"
+    return 0
+  fi
+
+  if [[ "${IPROTEINHUNTER_AUTO_BOOTSTRAP_PYTHON311}" != "1" ]]; then
+    echo "ERROR: ${PYTHON_BIN} not found."
+    echo "Install Python 3.11, or re-run with:"
+    echo "  IPROTEINHUNTER_AUTO_BOOTSTRAP_PYTHON311=1 bash install_iProteinHunter.sh"
+    exit 1
+  fi
+
+  echo
+  echo "==> ${PYTHON_BIN} not found. Bootstrapping user-local Python 3.11 via uv..."
+
+  command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: curl is required for Python bootstrap."
+    exit 1
+  }
+
+  mkdir -p "${LOCAL_BIN}"
+  if [[ -x "${UV_BIN}" ]]; then
+    echo "Using existing uv at ${UV_BIN}"
+  else
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  fi
+
+  "${UV_BIN}" python install 3.11
+  export PATH="${LOCAL_BIN}:${PATH}"
+
+  command -v python3.11 >/dev/null 2>&1 || {
+    echo "ERROR: bootstrap completed but python3.11 is still not available."
+    echo "Try: export PATH=\"${LOCAL_BIN}:\$PATH\""
+    exit 1
+  }
+
+  PYTHON_BIN="$(command -v python3.11)"
+}
+
 echo "==> iProteinHunter root: ${IPROTEINHUNTER_ROOT}"
 
 command -v git >/dev/null 2>&1 || {
@@ -34,11 +77,7 @@ command -v git >/dev/null 2>&1 || {
   exit 1
 }
 
-command -v "${PYTHON_BIN}" >/dev/null 2>&1 || {
-  echo "ERROR: ${PYTHON_BIN} not found."
-  echo "Install Python 3.11 (e.g. via python.org or pyenv)."
-  exit 1
-}
+ensure_python311
 
 "${PYTHON_BIN}" - <<'PY'
 import sys

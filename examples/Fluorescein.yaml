@@ -1,0 +1,10 @@
+sequences:
+  - protein:
+      id: A
+      sequence: 
+      msa: empty 
+  - ligand:
+      id: B
+      smiles: '[O-]c1ccc2c(Oc3cc([O-])ccc3C24OC(=O)c5ccccc45)c1'
+
+version: 1

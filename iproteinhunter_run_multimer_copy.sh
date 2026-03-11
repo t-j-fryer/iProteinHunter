@@ -49,6 +49,9 @@ HELIX_KILL=0
 NEGATIVE_HELIX_CONSTANT="0.5"
 LOOP_KILL="0"
 UNK_PATCH_MODE="auto"
+UNCONDITIONAL_MULTIMER_MODE=0
+UNCONDITIONAL_MULTIMER_SIZE="3"
+UNCONDITIONAL_MULTIMER_CHAINS="A,B,C"
 
 LIGAND_TEMP_DEFAULT="0.10"
 LIGAND_TEMP_CYCLE01="0.30"
@@ -124,6 +127,8 @@ Design controls:
   --helix-kill
   --negative-helix-constant X      0..1 helix-kill strength (default: ${NEGATIVE_HELIX_CONSTANT})
   --loopkill X                     0..1 loop-kill strength (default: ${LOOP_KILL})
+  --unconditional-trimer           alias of --unconditional-multimer-size 3
+  --unconditional-multimer-size N  unconditional N-mer mode (A..), copy init seq to all chains
   --unk-patch-mode MODE            auto | ala | ala_gly | ala_gly_ser
   --ligand-temp-cycle1 T           default: ${LIGAND_TEMP_CYCLE01}
   --ligand-temp-cycle01 T          alias of --ligand-temp-cycle1
@@ -216,6 +221,8 @@ while [[ $# -gt 0 ]]; do
     --helix-kill) HELIX_KILL=1; shift 1 ;;
     --negative-helix-constant) NEGATIVE_HELIX_CONSTANT="$2"; shift 2 ;;
     --loopkill) LOOP_KILL="$2"; shift 2 ;;
+    --unconditional-trimer) UNCONDITIONAL_MULTIMER_MODE=1; UNCONDITIONAL_MULTIMER_SIZE="3"; shift 1 ;;
+    --unconditional-multimer-size) UNCONDITIONAL_MULTIMER_MODE=1; UNCONDITIONAL_MULTIMER_SIZE="$2"; shift 2 ;;
     --unk-patch-mode) UNK_PATCH_MODE="$2"; shift 2 ;;
 
     --ligand-temp-cycle1|--ligand-temp-cycle01) LIGAND_TEMP_CYCLE01="$2"; shift 2 ;;
@@ -313,6 +320,29 @@ case "${UNK_PATCH_MODE}" in
   ala|ala_gly|ala_gly_ser) : ;;
   *) die "Invalid --unk-patch-mode: ${UNK_PATCH_MODE}" ;;
 esac
+
+if [[ "${UNCONDITIONAL_MULTIMER_MODE}" -eq 1 ]]; then
+  python3 - "${UNCONDITIONAL_MULTIMER_SIZE}" <<'PY'
+import sys
+try:
+    n = int(sys.argv[1])
+except Exception:
+    raise SystemExit("--unconditional-multimer-size must be an integer")
+if n < 3 or n > 8:
+    raise SystemExit("--unconditional-multimer-size must be between 3 and 8")
+PY
+  UNCONDITIONAL_MULTIMER_CHAINS="$(python3 - "${UNCONDITIONAL_MULTIMER_SIZE}" <<'PY'
+import sys
+n = int(sys.argv[1])
+print(",".join(chr(ord("A")+i) for i in range(n)))
+PY
+)"
+  # In unconditional N-mer mode redesign all designed chains each cycle.
+  LIGANDMPNN_EXTRA_FLAGS_DEFAULT=(
+    "--seed" "111"
+    "--chains_to_design" "${UNCONDITIONAL_MULTIMER_CHAINS}"
+  )
+fi
 
 BOLTZ_EXTRA_FLAGS=("${BOLTZ_EXTRA_FLAGS_DEFAULT[@]}")
 if [[ -n "${BOLTZ_EXTRA_CLI_STRING}" ]]; then
@@ -542,10 +572,61 @@ make_yaml_with_binder_sequence() {
   local out_yaml="$2"
   local new_seq="$3"
   local target_msa_path="${4:-}"
-  python3 - "$template_yaml" "$out_yaml" "$new_seq" "$target_msa_path" <<'PY'
+  local multimer_mode="${5:-0}"
+  local multimer_size="${6:-3}"
+  python3 - "$template_yaml" "$out_yaml" "$new_seq" "$target_msa_path" "$multimer_mode" "$multimer_size" <<'PY'
 import sys
-template, out, new_seq, msa_path = sys.argv[1:5]
+from pathlib import Path
+template, out, new_seq, msa_path, multimer_mode, multimer_size = sys.argv[1:7]
 msa_path = msa_path or None
+multimer_mode = int(multimer_mode)
+multimer_size = int(multimer_size)
+
+def parse_multimer_state(seq_in: str, n_chains: int):
+    s = (seq_in or "").strip()
+    if not s:
+        raise SystemExit("Empty sequence state for multimer mode.")
+    parts = [p.strip() for p in s.split(":")]
+    parts = [p for p in parts if p]
+    if not parts:
+        raise SystemExit("Empty sequence state for multimer mode.")
+    if len(parts) >= n_chains:
+        return parts[:n_chains]
+    fill = parts[-1]
+    return parts + [fill] * (n_chains - len(parts))
+
+if multimer_mode == 1:
+    chain_ids = [chr(ord("A") + i) for i in range(multimer_size)]
+    chain_seqs = parse_multimer_state(new_seq, multimer_size)
+    out_path = Path(out)
+    msa_dir = out_path.parent / "single_msa"
+    msa_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_single_seq_a3m(path: Path, seq: str):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f">query\n{seq}\n>|||DUMMY||\n{seq}\n")
+        return str(path)
+
+    seq_to_msa = {}
+    chain_rows = list(zip(chain_ids, chain_seqs))
+    chain_to_msa = {}
+    for cid, seq in chain_rows:
+        if seq not in seq_to_msa:
+            # Keep OpenFold-compatible MSA basename while still allowing multiple unique sequences.
+            seq_idx = len(seq_to_msa) + 1
+            msa_path = msa_dir / f"seq_{seq_idx}" / "uniref90_hits.a3m"
+            seq_to_msa[seq] = write_single_seq_a3m(msa_path, seq)
+        chain_to_msa[cid] = seq_to_msa[seq]
+
+    with out_path.open("w") as fout:
+        fout.write("sequences:\n")
+        for cid, seq in chain_rows:
+            fout.write("  - protein:\n")
+            fout.write(f"      id: {cid}\n")
+            fout.write(f"      sequence: {seq}\n")
+            fout.write(f"      msa: {chain_to_msa[cid]}\n")
+        fout.write("version: 1\n")
+    raise SystemExit(0)
 
 in_binder = False
 in_protein = False
@@ -841,6 +922,9 @@ write_single_seq_a3m() {
   mkdir -p "$(dirname "$out")"
   {
     echo ">query"
+    echo "$seq"
+    # OpenFold MSA parsing can drop single-row alignments; keep one dummy hit row.
+    echo ">|||DUMMY||"
     echo "$seq"
   } > "$out"
 }
@@ -1140,10 +1224,14 @@ PY
 }
 
 extract_redesigned_sequence_from_fastas() {
-  python3 - "$@" <<'PY'
+  local multimer_mode="${UNCONDITIONAL_MULTIMER_MODE:-0}"
+  local multimer_size="${UNCONDITIONAL_MULTIMER_SIZE:-3}"
+  python3 - "$multimer_mode" "$multimer_size" "$@" <<'PY'
 import sys
 from pathlib import Path
-paths=[Path(p) for p in sys.argv[1:]]
+multimer_mode = int(sys.argv[1])
+multimer_size = int(sys.argv[2])
+paths=[Path(p) for p in sys.argv[3:]]
 if not paths:
     raise SystemExit("No FASTA files passed")
 seqs=[]
@@ -1163,7 +1251,17 @@ for p in paths:
 if not seqs:
     raise SystemExit("No sequences found")
 pick = seqs[1] if len(seqs) >= 2 else seqs[0]
-print(pick.split(":",1)[0] if ":" in pick else pick)
+if multimer_mode == 1:
+    parts = [p.strip() for p in pick.split(":") if p.strip()]
+    if not parts:
+        raise SystemExit("No redesign sequence found in FASTA")
+    if len(parts) >= multimer_size:
+        use = parts[:multimer_size]
+    else:
+        use = parts + [parts[-1]] * (multimer_size - len(parts))
+    print(":".join(use))
+else:
+    print(pick.split(":",1)[0] if ":" in pick else pick)
 PY
 }
 
@@ -1669,7 +1767,7 @@ run_predictor_calibration_once() {
 
   # Calibrate with the longest binder in the configured range.
   cal_seq="$(generate_random_binder_seq "${BINDER_MAX_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "${predictor}")"
-  make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${cal_yaml}" "${cal_seq}" "${target_msa_path}"
+  make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${cal_yaml}" "${cal_seq}" "${target_msa_path}" "${UNCONDITIONAL_MULTIMER_MODE}" "${UNCONDITIONAL_MULTIMER_SIZE}"
   result="$(run_predictor_once "${predictor}" "${cal_yaml}" "${cal_seq}" "${qname}" "${cal_dir}" "${target_msa_path}" "design")"
   [[ -n "${result}" ]] || die "Calibration prediction produced no output."
 }
@@ -1855,6 +1953,15 @@ run_one_design() {
 
   local current_seq
   current_seq="$(generate_random_binder_seq "${BINDER_MIN_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "${PREDICTOR}")"
+  if [[ "${UNCONDITIONAL_MULTIMER_MODE}" -eq 1 ]]; then
+    current_seq="$(python3 - "${current_seq}" "${UNCONDITIONAL_MULTIMER_SIZE}" <<'PY'
+import sys
+seq = sys.argv[1]
+n = int(sys.argv[2])
+print(":".join([seq] * n))
+PY
+)"
+  fi
   echo "$current_seq" > "$state_seq"
 
   local cycle
@@ -1868,7 +1975,7 @@ run_one_design() {
 
     local target_msa_for_pred
     target_msa_for_pred="$(pick_target_msa_for_predictor "${target_msa_path}" "${PREDICTOR}")"
-    make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${cycle_yaml}" "${current_seq}" "${target_msa_for_pred}"
+    make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${cycle_yaml}" "${current_seq}" "${target_msa_for_pred}" "${UNCONDITIONAL_MULTIMER_MODE}" "${UNCONDITIONAL_MULTIMER_SIZE}"
 
     local cstart cend cdur result struct conf iptm plddt
     cstart="$(now_epoch)"
@@ -1933,7 +2040,7 @@ run_post_task() {
   qname="${run_tag}_post_$(printf '%02d' "$cycle_index")"
   local target_msa_for_post
   target_msa_for_post="$(pick_target_msa_for_predictor "${target_msa_path}" "${predictor}")"
-  make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${input_yaml}" "${binder_seq}" "${target_msa_for_post}"
+  make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${input_yaml}" "${binder_seq}" "${target_msa_for_post}" "${UNCONDITIONAL_MULTIMER_MODE}" "${UNCONDITIONAL_MULTIMER_SIZE}"
 
   local t0 t1 dt result struct conf iptm plddt
   t0="$(now_epoch)"
@@ -2089,7 +2196,7 @@ else
       mkdir -p "${CAL_DIR}"
       CAL_YAML="${CAL_DIR}/boltz_input.yaml"
       CAL_SEQ="$(generate_random_binder_seq "${BINDER_MAX_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "boltz")"
-      make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${CAL_YAML}" "${CAL_SEQ}" ""
+      make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${CAL_YAML}" "${CAL_SEQ}" "" "${UNCONDITIONAL_MULTIMER_MODE}" "${UNCONDITIONAL_MULTIMER_SIZE}"
 
       PEAK_MB_FILE="${EXPT_ROOT}/calibration_peak_rss_mb.txt"
       if ! run_boltz_predict_monitored "${CAL_YAML}" "${CAL_DIR}/boltz" "${PEAK_MB_FILE}"; then
@@ -2115,7 +2222,7 @@ else
       mkdir -p "${CAL_DIR}"
       CAL_YAML="${CAL_DIR}/boltz_input.yaml"
       CAL_SEQ="$(generate_random_binder_seq "${BINDER_MAX_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "intellifold")"
-      make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${CAL_YAML}" "${CAL_SEQ}" ""
+      make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${CAL_YAML}" "${CAL_SEQ}" "" "${UNCONDITIONAL_MULTIMER_MODE}" "${UNCONDITIONAL_MULTIMER_SIZE}"
 
       PEAK_MB_FILE="${EXPT_ROOT}/calibration_peak_rss_mb.txt"
       if ! run_intellifold_predict_monitored "${CAL_YAML}" "${CAL_DIR}/intellifold" "${PEAK_MB_FILE}"; then
@@ -2260,6 +2367,9 @@ echo "MPNN temp other cycles  : ${LIGAND_TEMP_DEFAULT}"
 echo "MPNN bias cycle_00->01  : ${LIGAND_BIAS_AA_CYCLE01:-none}"
 echo "MPNN bias other cycles  : ${LIGAND_BIAS_AA_DEFAULT:-none}"
 echo "Loop-kill constant      : ${LOOP_KILL}"
+if [[ "${UNCONDITIONAL_MULTIMER_MODE}" -eq 1 ]]; then
+  echo "Unconditional multimer  : ${UNCONDITIONAL_MULTIMER_SIZE}-mer (${UNCONDITIONAL_MULTIMER_CHAINS})"
+fi
 if [[ "${PREDICTOR}" == "boltz" ]]; then
   echo "Boltz design potentials : ${BOLTZ_USE_POTENTIALS_DEFAULT} (mode=${BOLTZ_USE_POTENTIALS_MODE})"
 fi
