@@ -278,6 +278,48 @@ pip install torch==2.6.0
 # Install openfold-3-mlx (editable)
 pip install -e "${OPENFOLD_REPO}"
 
+OPENFOLD_CACHE_DIR="${OPENFOLD_CACHE:-$HOME/.openfold3}"
+OPENFOLD_CHECKPOINT_PATH="${OPENFOLD_CACHE_DIR}/of3_ft3_v1.pt"
+
+echo "==> Ensuring OpenFold checkpoint (non-interactive): ${OPENFOLD_CHECKPOINT_PATH}"
+
+python - "${OPENFOLD_CHECKPOINT_PATH}" <<'PY'
+import pathlib
+import sys
+
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
+
+target = pathlib.Path(sys.argv[1]).expanduser()
+target.parent.mkdir(parents=True, exist_ok=True)
+
+bucket = "openfold"
+key = "openfold3_params/of3_ft3_v1.pt"
+s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+remote_size = int(s3.head_object(Bucket=bucket, Key=key)["ContentLength"])
+
+if target.exists() and target.stat().st_size == remote_size:
+    print(f"✓ OpenFold checkpoint already present: {target}")
+    raise SystemExit(0)
+
+tmp = target.with_suffix(target.suffix + ".part")
+if tmp.exists():
+    tmp.unlink()
+
+print(f"Downloading OpenFold checkpoint ({remote_size / (1024**3):.2f} GB)...")
+s3.download_file(bucket, key, str(tmp))
+downloaded_size = tmp.stat().st_size
+if downloaded_size != remote_size:
+    tmp.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"OpenFold checkpoint download incomplete: expected {remote_size}, got {downloaded_size}"
+    )
+
+tmp.replace(target)
+print(f"✓ OpenFold checkpoint ready: {target}")
+PY
+
 deactivate
 
 ########################################

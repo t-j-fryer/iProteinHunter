@@ -30,6 +30,14 @@ summarize_campaign_iptm.py
 iProteinHunter_run_0402.sh
 iProteinHunter_run_copy.sh
 iProteinHunter_run_0802.sh
+analyze_dssp_helixkill.py
+analyze_iptm_ppi_campaign_vs_af3.py
+plot_bench_parallel_combined.py
+plot_unconditional_helixkill_cycles_by_model.py
+plot_unconditional_helixkill_secondary_structure.py
+recover_post_only.py
+run_benchmark_acbx_contacts_matrix.sh
+run_benchmark_acbx_contacts_matrix_v2.sh
 
 # OS junk
 .DS_Store

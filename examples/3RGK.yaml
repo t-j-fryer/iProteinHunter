@@ -1,0 +1,10 @@
+sequences:
+  - protein:
+      id: A
+      sequence: 
+      msa: empty 
+  - ligand:
+      id: B
+      smiles: 'C=CC1=C(C)C2=NC1=Cc1[n-]c(c(c1C)CCC(=O)O)C=C1N=C(C=c3[n-]c(=C2)c(C=C)c3C)C(=C1CCC(=O)O)C.[Fe+2]'
+
+version: 1

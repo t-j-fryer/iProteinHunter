@@ -12,6 +12,8 @@ OPENFOLD_VENV="${REPO_ROOT}/venvs/iProteinHunter_openfold3_mlx"
 BOLTZ_CLI="boltz"
 INTELLIFOLD_CLI="intellifold"
 OPENFOLD_CLI="run_openfold"
+OPENFOLD_CACHE_DIR="${OPENFOLD_CACHE:-$HOME/.openfold3}"
+OPENFOLD_CHECKPOINT_PATH="${OPENFOLD_CACHE_DIR}/of3_ft3_v1.pt"
 
 LIGANDMPNN_REPO="${REPO_ROOT}/src/LigandMPNN"
 LIGANDMPNN_RUN="python run.py"
@@ -45,6 +47,19 @@ BINDER_MIN_LEN=65
 BINDER_MAX_LEN=150
 BINDER_PERCENT_X=50
 
+MOTIF_SCAFFOLDING=0
+MOTIF_POSITIONS=""
+MOTIF_FIXED_POSITIONS=""
+MOTIF_SOURCE_SEQ=""
+MOTIF_GAP_BETWEEN=8
+MOTIF_HELPER="${REPO_ROOT}/motif_scaffolding_helper.py"
+
+PARTIAL_REDESIGN=0
+PARTIAL_REDESIGN_RANGES=""
+PARTIAL_BINDER_SEQ=""
+PARTIAL_REDESIGNED_RESIDUES=""
+PARTIAL_BINDER_LEN=0
+
 HELIX_KILL=0
 NEGATIVE_HELIX_CONSTANT="0.5"
 LOOP_KILL="0"
@@ -59,6 +74,15 @@ BOLTZ_USE_POTENTIALS_MODE="auto"
 BOLTZ_USE_POTENTIALS_DEFAULT=0
 
 IPTM_THRESHOLD="0.80"
+
+PEAK_RSS_MB=0
+PEAK_FOOTPRINT_MB=0
+PEAK_SYS_DELTA_MB=0
+PEAK_EFFECTIVE_MB=0
+MONITOR_PEAK_RSS_MB=0
+MONITOR_PEAK_FOOTPRINT_MB=0
+MONITOR_PEAK_SYS_DELTA_MB=0
+MONITOR_PEAK_EFFECTIVE_MB=0
 
 BOLTZ_EXTRA_FLAGS_DEFAULT=(
   "--accelerator" "gpu"
@@ -119,6 +143,13 @@ Binder:
   --binder-max-len N               default: ${BINDER_MAX_LEN}
   --binder-percent-x P             default: ${BINDER_PERCENT_X}
                                    (OpenFold-3 uses A/N/G/H/F/S/Y spikes at this rate; others use X)
+  --motif-scaffolding              enable motif scaffolding mode (Boltz design only)
+  --motif-positions STR            motifs as JSON or ranges like "31-45,63-106" (1-based ranges)
+  --motif-source-seq STR           source sequence used to extract motif residues
+  --motif-fixed-positions STR      optional 1-based original positions to fix (comma-separated)
+  --gap-between-motifs N           minimum internal gap between motifs (default: ${MOTIF_GAP_BETWEEN})
+  --partial-redesign               keep binder fixed except selected redesign ranges
+  --partial-redesign-ranges STR    comma-separated 1-based ranges, e.g. "25-50,70-75"
 
 Design controls:
   --helix-kill
@@ -212,6 +243,13 @@ while [[ $# -gt 0 ]]; do
     --binder-min-len) BINDER_MIN_LEN="$2"; shift 2 ;;
     --binder-max-len) BINDER_MAX_LEN="$2"; shift 2 ;;
     --binder-percent-x) BINDER_PERCENT_X="$2"; shift 2 ;;
+    --motif-scaffolding) MOTIF_SCAFFOLDING=1; shift 1 ;;
+    --motif-positions) MOTIF_POSITIONS="$2"; shift 2 ;;
+    --motif-source-seq) MOTIF_SOURCE_SEQ="$2"; shift 2 ;;
+    --motif-fixed-positions) MOTIF_FIXED_POSITIONS="$2"; shift 2 ;;
+    --gap-between-motifs) MOTIF_GAP_BETWEEN="$2"; shift 2 ;;
+    --partial-redesign) PARTIAL_REDESIGN=1; shift 1 ;;
+    --partial-redesign-ranges) PARTIAL_REDESIGN_RANGES="$2"; shift 2 ;;
 
     --helix-kill) HELIX_KILL=1; shift 1 ;;
     --negative-helix-constant) NEGATIVE_HELIX_CONSTANT="$2"; shift 2 ;;
@@ -271,6 +309,13 @@ esac
 
 if [[ "${POST_MODE}" == "none" ]]; then
   POST_PREDICTORS=()
+fi
+
+if [[ "${MOTIF_SCAFFOLDING}" -eq 1 && "${PREDICTOR}" != "boltz" ]]; then
+  die "--motif-scaffolding currently supports --predictor boltz only."
+fi
+if [[ "${MOTIF_SCAFFOLDING}" -eq 1 && "${PARTIAL_REDESIGN}" -eq 1 ]]; then
+  die "--motif-scaffolding and --partial-redesign cannot be used together."
 fi
 
 python3 - "$N_RUNS" "$N_CYCLES" "$IPTM_THRESHOLD" "$POST_IPTM_THRESHOLD" "$MEM_SAFETY" "$LIGAND_TEMP_DEFAULT" "$LIGAND_TEMP_CYCLE01" "$NEGATIVE_HELIX_CONSTANT" "$LOOP_KILL" <<'PY'
@@ -367,6 +412,100 @@ fi
 [[ -x "${OPENFOLD_VENV}/bin/python" ]] || die "OpenFold venv not found: ${OPENFOLD_VENV}"
 [[ -f "${LIGANDMPNN_REPO}/run.py" ]] || die "LigandMPNN run.py not found: ${LIGANDMPNN_REPO}/run.py"
 
+if [[ "${MOTIF_SCAFFOLDING}" -eq 1 ]]; then
+  [[ -f "${MOTIF_HELPER}" ]] || die "Motif helper not found: ${MOTIF_HELPER}"
+  [[ -n "${MOTIF_POSITIONS}" ]] || die "--motif-positions is required with --motif-scaffolding"
+  [[ -n "${MOTIF_SOURCE_SEQ}" ]] || die "--motif-source-seq is required with --motif-scaffolding"
+  python3 "${MOTIF_HELPER}" validate \
+    --motif-positions "${MOTIF_POSITIONS}" \
+    --source-sequence "${MOTIF_SOURCE_SEQ}" \
+    --motif-fixed-positions "${MOTIF_FIXED_POSITIONS}" \
+    --gap-between-motifs "${MOTIF_GAP_BETWEEN}" \
+    --min-length "${BINDER_MIN_LEN}" \
+    --max-length "${BINDER_MAX_LEN}" \
+    >/dev/null
+fi
+
+if [[ "${PARTIAL_REDESIGN}" -eq 1 ]]; then
+  [[ -n "${PARTIAL_REDESIGN_RANGES}" ]] || die "--partial-redesign-ranges is required with --partial-redesign"
+  set +e
+  local_partial_payload="$(
+    python3 - "${TEMPLATE_YAML}" "${PARTIAL_REDESIGN_RANGES}" 2>&1 <<'PY'
+import re
+import sys
+
+template_yaml, ranges_raw = sys.argv[1:3]
+
+cur = None
+seqs = {}
+in_protein = False
+for raw in open(template_yaml):
+    s = raw.strip()
+    if s.startswith("- protein:"):
+        in_protein = True
+        cur = None
+        continue
+    if not in_protein:
+        continue
+    if s.startswith("-") and not s.startswith("- protein:"):
+        in_protein = False
+        continue
+    if s.startswith("id:"):
+        cur = s.split(":", 1)[1].strip().strip("'\"")
+        continue
+    if s.startswith("sequence:") and cur:
+        seqs[cur] = s.split(":", 1)[1].strip().strip("'\"")
+
+binder_seq = (seqs.get("A", "") or "").strip()
+if not binder_seq or binder_seq.lower() in {"empty", "none", "null"}:
+    raise SystemExit("Template chain A sequence is empty; partial redesign requires a concrete binder sequence.")
+
+L = len(binder_seq)
+tokens = [t.strip() for t in re.split(r"[;,]", ranges_raw) if t.strip()]
+if not tokens:
+    raise SystemExit("No valid ranges parsed from --partial-redesign-ranges.")
+
+ranges = []
+for tok in tokens:
+    if "-" not in tok:
+        raise SystemExit(f"Invalid redesign range '{tok}', expected start-end.")
+    a, b = tok.split("-", 1)
+    start = int(a.strip())
+    end = int(b.strip())
+    if start < 1 or end < 1:
+        raise SystemExit(f"Invalid redesign range '{tok}', positions must be >= 1.")
+    if start > end:
+        raise SystemExit(f"Invalid redesign range '{tok}', start > end.")
+    if end > L:
+        raise SystemExit(
+            f"Invalid redesign range '{tok}', exceeds binder length {L}."
+        )
+    ranges.append((start, end))
+
+ranges.sort()
+for i in range(1, len(ranges)):
+    if ranges[i][0] <= ranges[i - 1][1]:
+        raise SystemExit("Redesign ranges must be non-overlapping.")
+
+positions = []
+for a, b in ranges:
+    positions.extend(range(a, b + 1))
+
+norm_ranges = ",".join(f"{a}-{b}" for a, b in ranges)
+redesigned = " ".join(f"A{p}" for p in positions)
+print("\t".join([binder_seq, redesigned, norm_ranges, str(L)]))
+PY
+  )"
+  partial_rc=$?
+  set -e
+  if [[ "${partial_rc}" -ne 0 ]]; then
+    die "${local_partial_payload}"
+  fi
+  IFS=$'\t' read -r PARTIAL_BINDER_SEQ PARTIAL_REDESIGNED_RESIDUES PARTIAL_REDESIGN_RANGES PARTIAL_BINDER_LEN <<< "${local_partial_payload}"
+  [[ -n "${PARTIAL_BINDER_SEQ}" ]] || die "Failed to parse binder sequence for partial redesign."
+  [[ -n "${PARTIAL_REDESIGNED_RESIDUES}" ]] || die "Failed to parse redesigned residues for partial redesign."
+fi
+
 HAS_SMALL_MOLECULE_LIGAND="$(python3 - "${TEMPLATE_YAML}" <<'PY'
 import sys
 path = sys.argv[1]
@@ -451,6 +590,103 @@ raise SystemExit(0)
 PY
 }
 
+normalize_predictor_result_line() {
+  local raw="$1"
+  python3 - "$raw" <<'PY'
+import sys
+
+text = sys.argv[1]
+lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+for ln in reversed(lines):
+    if ln.count("|") >= 3:
+        print(ln)
+        raise SystemExit(0)
+if lines:
+    print(lines[-1])
+PY
+}
+
+get_system_available_kb() {
+  python3 - <<'PY'
+import re
+import subprocess
+
+try:
+    out = subprocess.check_output(["vm_stat"], text=True, stderr=subprocess.DEVNULL)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+m = re.search(r"page size of (\d+) bytes", out)
+page_size = int(m.group(1)) if m else 4096
+
+pages = {
+    "Pages free": 0,
+    "Pages inactive": 0,
+    "Pages speculative": 0,
+}
+
+for raw in out.splitlines():
+    line = raw.strip()
+    m = re.match(r"^([^:]+):\s*([0-9][0-9,]*)\.?$", line)
+    if not m:
+        continue
+    key = m.group(1)
+    if key in pages:
+        pages[key] = int(m.group(2).replace(",", ""))
+
+available_pages = pages["Pages free"] + pages["Pages inactive"] + pages["Pages speculative"]
+print(max(0, (available_pages * page_size) // 1024))
+PY
+}
+
+get_process_physical_footprint_kb() {
+  local pid="$1"
+  python3 - "${pid}" <<'PY'
+import re
+import subprocess
+import sys
+
+pid = str(sys.argv[1]).strip()
+if not pid:
+    print(0)
+    raise SystemExit(0)
+
+try:
+    out = subprocess.check_output(["vmmap", "-summary", pid], text=True, stderr=subprocess.DEVNULL)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+m = re.search(r"Physical footprint:\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?)[Bb]?", out)
+if not m:
+    print(0)
+    raise SystemExit(0)
+
+value = float(m.group(1))
+unit = (m.group(2) or "K").upper()
+scale = {
+    "": 1,
+    "K": 1,
+    "M": 1024,
+    "G": 1024 * 1024,
+    "T": 1024 * 1024 * 1024,
+}.get(unit, 1)
+print(max(0, int(value * scale)))
+PY
+}
+
+write_calibration_memory_metrics() {
+  local out_csv="$1"
+  {
+    echo "metric,mb"
+    echo "peak_rss_mb,${PEAK_RSS_MB}"
+    echo "peak_physical_footprint_mb,${PEAK_FOOTPRINT_MB}"
+    echo "peak_system_delta_mb,${PEAK_SYS_DELTA_MB}"
+    echo "peak_effective_mb,${PEAK_EFFECTIVE_MB}"
+  } > "${out_csv}"
+}
+
 generate_random_binder_seq() {
   local min_len="$1"
   local max_len="$2"
@@ -513,6 +749,60 @@ for i in range(L):
     seq[i] = random.choices(AA_POOL, weights=w, k=1)[0]
 print("".join(seq))
 PY
+}
+
+generate_partial_redesign_seed_seq() {
+  local base_seq="$1"
+  local ranges_csv="$2"
+  local percent_x="$3"
+  local helix_kill="$4"
+  local neg_helix_constant="$5"
+  local loop_kill="${6:-0}"
+  local predictor="${7:-}"
+
+  local seq_len seeded_random
+  seq_len="${#base_seq}"
+  seeded_random="$(generate_random_binder_seq "${seq_len}" "${seq_len}" "${percent_x}" "${helix_kill}" "${neg_helix_constant}" "${loop_kill}" "${predictor}")"
+
+  python3 - "${base_seq}" "${seeded_random}" "${ranges_csv}" <<'PY'
+import re
+import sys
+
+base_seq, seeded_seq, ranges_raw = sys.argv[1:4]
+
+if len(base_seq) != len(seeded_seq):
+    raise SystemExit("Internal error: partial redesign seed length mismatch.")
+
+tokens = [t.strip() for t in re.split(r"[;,]", ranges_raw) if t.strip()]
+if not tokens:
+    raise SystemExit("Internal error: no ranges provided to partial redesign seeding.")
+
+out = list(base_seq)
+L = len(out)
+for tok in tokens:
+    if "-" not in tok:
+        raise SystemExit(f"Internal error: invalid range '{tok}'.")
+    a, b = tok.split("-", 1)
+    start = int(a.strip())
+    end = int(b.strip())
+    if start < 1 or end < 1 or start > end or end > L:
+        raise SystemExit(f"Internal error: range '{tok}' out of bounds for length {L}.")
+    out[start - 1 : end] = list(seeded_seq[start - 1 : end])
+
+print("".join(out))
+PY
+}
+
+generate_motif_scaffold_bundle() {
+  local min_len="$1"
+  local max_len="$2"
+  python3 "${MOTIF_HELPER}" generate \
+    --motif-positions "${MOTIF_POSITIONS}" \
+    --source-sequence "${MOTIF_SOURCE_SEQ}" \
+    --motif-fixed-positions "${MOTIF_FIXED_POSITIONS}" \
+    --gap-between-motifs "${MOTIF_GAP_BETWEEN}" \
+    --min-length "${min_len}" \
+    --max-length "${max_len}"
 }
 
 compute_loopkill_mpnn_bias() {
@@ -1451,19 +1741,46 @@ run_boltz_predict_monitored() {
   "${cmd[@]}" >"${predict_log}" 2>&1 &
   local pid=$!
 
-  local peak_kb=0
+  local baseline_avail_kb min_avail_kb
+  baseline_avail_kb="$(get_system_available_kb)"
+  if [[ -z "${baseline_avail_kb}" || ! "${baseline_avail_kb}" =~ ^[0-9]+$ ]]; then
+    baseline_avail_kb=0
+  fi
+  min_avail_kb="${baseline_avail_kb}"
+
+  local peak_rss_kb=0
+  local peak_footprint_kb=0
   local tick=0
   while kill -0 "${pid}" 2>/dev/null; do
-    local rss_kb
+    local rss_kb footprint_kb avail_kb sys_delta_mb
     rss_kb="$(ps -o rss= -p "${pid}" 2>/dev/null | awk '{print $1}' || echo 0)"
+    footprint_kb="$(get_process_physical_footprint_kb "${pid}")"
+    avail_kb="$(get_system_available_kb)"
+
     if [[ -n "${rss_kb}" && "${rss_kb}" =~ ^[0-9]+$ ]]; then
-      if (( rss_kb > peak_kb )); then
-        peak_kb="${rss_kb}"
+      if (( rss_kb > peak_rss_kb )); then
+        peak_rss_kb="${rss_kb}"
       fi
     fi
+    if [[ -n "${footprint_kb}" && "${footprint_kb}" =~ ^[0-9]+$ ]]; then
+      if (( footprint_kb > peak_footprint_kb )); then
+        peak_footprint_kb="${footprint_kb}"
+      fi
+    fi
+    if [[ -n "${avail_kb}" && "${avail_kb}" =~ ^[0-9]+$ ]]; then
+      if (( min_avail_kb == 0 || avail_kb < min_avail_kb )); then
+        min_avail_kb="${avail_kb}"
+      fi
+    fi
+
+    sys_delta_mb=0
+    if (( baseline_avail_kb > 0 && min_avail_kb > 0 && baseline_avail_kb > min_avail_kb )); then
+      sys_delta_mb="$(( (baseline_avail_kb - min_avail_kb) / 1024 ))"
+    fi
+
     tick=$((tick + 1))
     if (( tick % 30 == 0 )); then
-      echo ">>> Calibration Boltz still running (pid=${pid}, elapsed=${tick}s, rss_kb=${rss_kb})" >&2
+      echo ">>> Calibration Boltz still running (pid=${pid}, elapsed=${tick}s, rss_kb=${rss_kb}, footprint_kb=${footprint_kb}, sys_delta_mb=${sys_delta_mb})" >&2
     fi
     sleep 0.5
   done
@@ -1472,14 +1789,37 @@ run_boltz_predict_monitored() {
   local rc=$?
   deactivate || true
 
-  local peak_mb
-  peak_mb="$(python3 - "$peak_kb" <<'PY'
+  local peak_rss_mb peak_footprint_mb peak_sys_delta_mb peak_effective_mb
+  peak_rss_mb="$(python3 - "${peak_rss_kb}" <<'PY'
 import sys
 kb=int(sys.argv[1])
 print(max(1, int(kb/1024)))
 PY
 )"
-  echo "${peak_mb}" > "${peak_file}"
+  peak_footprint_mb="$(python3 - "${peak_footprint_kb}" <<'PY'
+import sys
+kb=int(sys.argv[1])
+print(max(1, int(kb/1024)))
+PY
+)"
+  peak_sys_delta_mb="$(python3 - "${baseline_avail_kb}" "${min_avail_kb}" <<'PY'
+import sys
+base=int(sys.argv[1]); minimum=int(sys.argv[2])
+delta=max(0, base-minimum)
+print(max(0, int(delta/1024)))
+PY
+)"
+  peak_effective_mb="$(python3 - "${peak_rss_mb}" "${peak_footprint_mb}" "${peak_sys_delta_mb}" <<'PY'
+import sys
+vals=[int(x) for x in sys.argv[1:]]
+print(max(vals))
+PY
+)"
+  MONITOR_PEAK_RSS_MB="${peak_rss_mb}"
+  MONITOR_PEAK_FOOTPRINT_MB="${peak_footprint_mb}"
+  MONITOR_PEAK_SYS_DELTA_MB="${peak_sys_delta_mb}"
+  MONITOR_PEAK_EFFECTIVE_MB="${peak_effective_mb}"
+  echo "${peak_effective_mb}" > "${peak_file}"
   return "${rc}"
 }
 
@@ -1501,19 +1841,46 @@ run_intellifold_predict_monitored() {
   fi
   local pid=$!
 
-  local peak_kb=0
+  local baseline_avail_kb min_avail_kb
+  baseline_avail_kb="$(get_system_available_kb)"
+  if [[ -z "${baseline_avail_kb}" || ! "${baseline_avail_kb}" =~ ^[0-9]+$ ]]; then
+    baseline_avail_kb=0
+  fi
+  min_avail_kb="${baseline_avail_kb}"
+
+  local peak_rss_kb=0
+  local peak_footprint_kb=0
   local tick=0
   while kill -0 "${pid}" 2>/dev/null; do
-    local rss_kb
+    local rss_kb footprint_kb avail_kb sys_delta_mb
     rss_kb="$(ps -o rss= -p "${pid}" 2>/dev/null | awk '{print $1}' || echo 0)"
+    footprint_kb="$(get_process_physical_footprint_kb "${pid}")"
+    avail_kb="$(get_system_available_kb)"
+
     if [[ -n "${rss_kb}" && "${rss_kb}" =~ ^[0-9]+$ ]]; then
-      if (( rss_kb > peak_kb )); then
-        peak_kb="${rss_kb}"
+      if (( rss_kb > peak_rss_kb )); then
+        peak_rss_kb="${rss_kb}"
       fi
     fi
+    if [[ -n "${footprint_kb}" && "${footprint_kb}" =~ ^[0-9]+$ ]]; then
+      if (( footprint_kb > peak_footprint_kb )); then
+        peak_footprint_kb="${footprint_kb}"
+      fi
+    fi
+    if [[ -n "${avail_kb}" && "${avail_kb}" =~ ^[0-9]+$ ]]; then
+      if (( min_avail_kb == 0 || avail_kb < min_avail_kb )); then
+        min_avail_kb="${avail_kb}"
+      fi
+    fi
+
+    sys_delta_mb=0
+    if (( baseline_avail_kb > 0 && min_avail_kb > 0 && baseline_avail_kb > min_avail_kb )); then
+      sys_delta_mb="$(( (baseline_avail_kb - min_avail_kb) / 1024 ))"
+    fi
+
     tick=$((tick + 1))
     if (( tick % 30 == 0 )); then
-      echo ">>> Calibration IntelliFold still running (pid=${pid}, elapsed=${tick}s, rss_kb=${rss_kb})" >&2
+      echo ">>> Calibration IntelliFold still running (pid=${pid}, elapsed=${tick}s, rss_kb=${rss_kb}, footprint_kb=${footprint_kb}, sys_delta_mb=${sys_delta_mb})" >&2
     fi
     sleep 0.5
   done
@@ -1522,14 +1889,37 @@ run_intellifold_predict_monitored() {
   local rc=$?
   deactivate || true
 
-  local peak_mb
-  peak_mb="$(python3 - "$peak_kb" <<'PY'
+  local peak_rss_mb peak_footprint_mb peak_sys_delta_mb peak_effective_mb
+  peak_rss_mb="$(python3 - "${peak_rss_kb}" <<'PY'
 import sys
 kb=int(sys.argv[1])
 print(max(1, int(kb/1024)))
 PY
 )"
-  echo "${peak_mb}" > "${peak_file}"
+  peak_footprint_mb="$(python3 - "${peak_footprint_kb}" <<'PY'
+import sys
+kb=int(sys.argv[1])
+print(max(1, int(kb/1024)))
+PY
+)"
+  peak_sys_delta_mb="$(python3 - "${baseline_avail_kb}" "${min_avail_kb}" <<'PY'
+import sys
+base=int(sys.argv[1]); minimum=int(sys.argv[2])
+delta=max(0, base-minimum)
+print(max(0, int(delta/1024)))
+PY
+)"
+  peak_effective_mb="$(python3 - "${peak_rss_mb}" "${peak_footprint_mb}" "${peak_sys_delta_mb}" <<'PY'
+import sys
+vals=[int(x) for x in sys.argv[1:]]
+print(max(vals))
+PY
+)"
+  MONITOR_PEAK_RSS_MB="${peak_rss_mb}"
+  MONITOR_PEAK_FOOTPRINT_MB="${peak_footprint_mb}"
+  MONITOR_PEAK_SYS_DELTA_MB="${peak_sys_delta_mb}"
+  MONITOR_PEAK_EFFECTIVE_MB="${peak_effective_mb}"
+  echo "${peak_effective_mb}" > "${peak_file}"
   return "${rc}"
 }
 
@@ -1609,11 +1999,15 @@ run_predict_openfold() {
   use_server="$(build_openfold_query_json "${input_yaml}" "${binder_seq_clean}" "${query_name}" "${query_json}" "${target_msa_path}" "${binder_msa_path}")"
   write_openfold_runner_yaml "${runner_yaml}"
 
+  # Avoid interactive checkpoint prompts by ensuring weights are present first.
+  ensure_openfold_checkpoint_noninteractive
+
   source "${OPENFOLD_VENV}/bin/activate"
   set +e
-  KMP_USE_SHM=0 "${OPENFOLD_CLI}" predict \
+  OPENFOLD_CACHE="${OPENFOLD_CACHE_DIR}" KMP_USE_SHM=0 "${OPENFOLD_CLI}" predict \
     --query_json "${query_json}" \
     --output_dir "${out_dir}" \
+    --inference_ckpt_path "${OPENFOLD_CHECKPOINT_PATH}" \
     --runner_yaml "${runner_yaml}" \
     --use_msa_server "${use_server}" \
     "${OPENFOLD_EXTRA_FLAGS[@]}" \
@@ -1658,6 +2052,46 @@ run_predict_openfold() {
   echo "${struct}|${conf}|${iptm}|${plddt}"
 }
 
+ensure_openfold_checkpoint_noninteractive() {
+  mkdir -p "${OPENFOLD_CACHE_DIR}"
+  "${OPENFOLD_VENV}/bin/python" - "${OPENFOLD_CHECKPOINT_PATH}" <<'PY'
+import pathlib
+import sys
+
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
+
+target = pathlib.Path(sys.argv[1]).expanduser()
+target.parent.mkdir(parents=True, exist_ok=True)
+
+bucket = "openfold"
+key = "openfold3_params/of3_ft3_v1.pt"
+s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+remote_size = int(s3.head_object(Bucket=bucket, Key=key)["ContentLength"])
+
+if target.exists() and target.stat().st_size == remote_size:
+    print(f"OpenFold checkpoint ready: {target}", file=sys.stderr)
+    raise SystemExit(0)
+
+tmp = target.with_suffix(target.suffix + ".part")
+if tmp.exists():
+    tmp.unlink()
+
+print(f"Downloading OpenFold checkpoint to {target} ({remote_size / (1024**3):.2f} GB)...", file=sys.stderr)
+s3.download_file(bucket, key, str(tmp))
+downloaded_size = tmp.stat().st_size
+if downloaded_size != remote_size:
+    tmp.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"OpenFold checkpoint download incomplete: expected {remote_size}, got {downloaded_size}"
+    )
+
+tmp.replace(target)
+print(f"OpenFold checkpoint ready: {target}", file=sys.stderr)
+PY
+}
+
 run_predictor_calibration_once() {
   local predictor="$1"
   local target_msa_path="$2"
@@ -1670,8 +2104,45 @@ run_predictor_calibration_once() {
   # Calibrate with the longest binder in the configured range.
   cal_seq="$(generate_random_binder_seq "${BINDER_MAX_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "${predictor}")"
   make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${cal_yaml}" "${cal_seq}" "${target_msa_path}"
-  result="$(run_predictor_once "${predictor}" "${cal_yaml}" "${cal_seq}" "${qname}" "${cal_dir}" "${target_msa_path}" "design")"
-  [[ -n "${result}" ]] || die "Calibration prediction produced no output."
+
+  case "${predictor}" in
+    boltz)
+      local peak_file use_pot
+      peak_file="${EXPT_ROOT}/calibration_peak_effective_mb.txt"
+      use_pot=0
+      if [[ "${BOLTZ_USE_POTENTIALS_DEFAULT}" -eq 1 ]]; then
+        use_pot=1
+      fi
+      if ! run_boltz_predict_monitored "${cal_yaml}" "${cal_dir}/boltz" "${peak_file}" "${use_pot}"; then
+        die "Calibration Boltz run failed."
+      fi
+      PEAK_EFFECTIVE_MB="$(cat "${peak_file}" 2>/dev/null || echo 0)"
+      PEAK_RSS_MB="${MONITOR_PEAK_RSS_MB:-0}"
+      PEAK_FOOTPRINT_MB="${MONITOR_PEAK_FOOTPRINT_MB:-0}"
+      PEAK_SYS_DELTA_MB="${MONITOR_PEAK_SYS_DELTA_MB:-0}"
+      [[ -n "${PEAK_EFFECTIVE_MB}" && "${PEAK_EFFECTIVE_MB}" != "0" ]] || PEAK_EFFECTIVE_MB="${MONITOR_PEAK_EFFECTIVE_MB:-0}"
+      echo "${PEAK_RSS_MB}" > "${EXPT_ROOT}/calibration_peak_rss_mb.txt"
+      write_calibration_memory_metrics "${EXPT_ROOT}/calibration_memory_metrics.csv"
+      ;;
+    intellifold)
+      local peak_file
+      peak_file="${EXPT_ROOT}/calibration_peak_effective_mb.txt"
+      if ! run_intellifold_predict_monitored "${cal_yaml}" "${cal_dir}/intellifold" "${peak_file}"; then
+        die "Calibration IntelliFold run failed."
+      fi
+      PEAK_EFFECTIVE_MB="$(cat "${peak_file}" 2>/dev/null || echo 0)"
+      PEAK_RSS_MB="${MONITOR_PEAK_RSS_MB:-0}"
+      PEAK_FOOTPRINT_MB="${MONITOR_PEAK_FOOTPRINT_MB:-0}"
+      PEAK_SYS_DELTA_MB="${MONITOR_PEAK_SYS_DELTA_MB:-0}"
+      [[ -n "${PEAK_EFFECTIVE_MB}" && "${PEAK_EFFECTIVE_MB}" != "0" ]] || PEAK_EFFECTIVE_MB="${MONITOR_PEAK_EFFECTIVE_MB:-0}"
+      echo "${PEAK_RSS_MB}" > "${EXPT_ROOT}/calibration_peak_rss_mb.txt"
+      write_calibration_memory_metrics "${EXPT_ROOT}/calibration_memory_metrics.csv"
+      ;;
+    *)
+      result="$(run_predictor_once "${predictor}" "${cal_yaml}" "${cal_seq}" "${qname}" "${cal_dir}" "${target_msa_path}" "design")"
+      [[ -n "${result}" ]] || die "Calibration prediction produced no output."
+      ;;
+  esac
 }
 
 run_predictor_once() {
@@ -1710,6 +2181,8 @@ run_ligandmpnn_redesign() {
   local cycle_dir="$1"
   local struct_path="$2"
   local cycle_idx="$3"
+  local fixed_residues="${4:-}"
+  local redesigned_residues="${5:-}"
   cycle_dir="$(cd "${cycle_dir}" && pwd)"
 
   local input_struct
@@ -1756,6 +2229,18 @@ PY
   ligand_out="${cycle_dir}/ligandmpnn"
   mkdir -p "${ligand_out}"
 
+  local fixed_flags=()
+  if [[ -n "${fixed_residues}" ]]; then
+    fixed_flags=(--fixed_residues "${fixed_residues}")
+  fi
+  local redesigned_flags=()
+  if [[ -n "${redesigned_residues}" ]]; then
+    redesigned_flags=(--redesigned_residues "${redesigned_residues}")
+  fi
+  if [[ -n "${fixed_residues}" && -n "${redesigned_residues}" ]]; then
+    die "Internal error: both fixed_residues and redesigned_residues were provided to LigandMPNN."
+  fi
+
   source "${LIGAND_VENV}/bin/activate"
   pushd "${LIGANDMPNN_REPO}" >/dev/null
   # LigandMPNN can fail on macOS CPU when OpenMP shared memory is unavailable.
@@ -1766,6 +2251,8 @@ PY
       --temperature "${temp}" \
       --omit_AA "${omit_aa}" \
       --bias_AA "${bias_aa}" \
+      ${fixed_flags[@]+"${fixed_flags[@]}"} \
+      ${redesigned_flags[@]+"${redesigned_flags[@]}"} \
       "${LIGANDMPNN_MODEL_FLAGS[@]}" \
       "${LIGANDMPNN_EXTRA_FLAGS[@]}" \
       > "${ligand_out}/ligandmpnn.log" 2>&1
@@ -1775,6 +2262,8 @@ PY
       --out_folder "${ligand_out}" \
       --temperature "${temp}" \
       --omit_AA "${omit_aa}" \
+      ${fixed_flags[@]+"${fixed_flags[@]}"} \
+      ${redesigned_flags[@]+"${redesigned_flags[@]}"} \
       "${LIGANDMPNN_MODEL_FLAGS[@]}" \
       "${LIGANDMPNN_EXTRA_FLAGS[@]}" \
       > "${ligand_out}/ligandmpnn.log" 2>&1
@@ -1834,7 +2323,7 @@ run_one_design() {
   local run_index="$1"
   local target_msa_path="$2"
 
-  local run_tag run_root state_seq metrics_csv rows_csv timing_cycle_csv timing_run_csv
+  local run_tag run_root state_seq metrics_csv rows_csv timing_cycle_csv timing_run_csv motif_cycle_csv
   run_tag="$(printf "run_%03d" "$run_index")"
   run_root="${EXPT_ROOT}/${run_tag}"
   mkdir -p "${run_root}"
@@ -1844,6 +2333,7 @@ run_one_design() {
   rows_csv="${run_root}/rows.csv"
   timing_cycle_csv="${run_root}/timing_cycles.csv"
   timing_run_csv="${run_root}/timing_run.csv"
+  motif_cycle_csv="${run_root}/motif_positions_by_cycle.csv"
 
   echo "cycle,iptm,complex_plddt,confidence_json,structure_path,binder_sequence" > "${metrics_csv}"
   echo "run,cycle,iptm,complex_plddt,binder_sequence,structure_path,confidence_json" > "${rows_csv}"
@@ -1853,8 +2343,63 @@ run_one_design() {
   run_start="$(now_epoch)"
   echo ">>> Starting ${run_tag}"
 
-  local current_seq
-  current_seq="$(generate_random_binder_seq "${BINDER_MIN_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "${PREDICTOR}")"
+  local current_seq motif_fixed_residues motif_shifted_summary partial_redesigned_residues
+  local motif_shifted_positions motif_shifted_ranges motif_source_ranges
+  motif_fixed_residues=""
+  motif_shifted_summary=""
+  partial_redesigned_residues=""
+  motif_shifted_positions=""
+  motif_shifted_ranges=""
+  motif_source_ranges=""
+  if [[ "${MOTIF_SCAFFOLDING}" -eq 1 ]]; then
+    local motif_bundle
+    motif_bundle="$(generate_motif_scaffold_bundle "${BINDER_MIN_LEN}" "${BINDER_MAX_LEN}")"
+    local motif_values
+    motif_values="$(python3 - "${motif_bundle}" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+init_sequence = str(data.get("init_sequence", "")).replace("\t", " ")
+fixed_residues = str(data.get("fixed_residues", "")).replace("\t", " ")
+shifted_summary = str(data.get("shifted_summary", "")).replace("\t", " ")
+motifs = data.get("shifted_motifs", [])
+positions = []
+shifted_ranges = []
+source_ranges = []
+for m in motifs:
+    ss = int(m["shifted_start"])
+    se = int(m["shifted_end"])
+    os = int(m["start_pos"])
+    oe = int(m["end_pos"])
+    positions.extend(range(ss + 1, se + 2))
+    shifted_ranges.append(f"{ss + 1}-{se + 1}")
+    source_ranges.append(f"{os + 1}-{oe + 1}")
+shifted_positions = " ".join(str(x) for x in positions).replace("\t", " ")
+shifted_ranges_s = ";".join(shifted_ranges).replace("\t", " ")
+source_ranges_s = ";".join(source_ranges).replace("\t", " ")
+print("\t".join([
+    init_sequence,
+    fixed_residues,
+    shifted_summary,
+    shifted_positions,
+    shifted_ranges_s,
+    source_ranges_s,
+]))
+PY
+)"
+    IFS=$'\t' read -r current_seq motif_fixed_residues motif_shifted_summary motif_shifted_positions motif_shifted_ranges motif_source_ranges <<< "${motif_values}"
+    [[ -n "${current_seq}" ]] || die "Motif scaffolding produced an empty initial sequence."
+    [[ -n "${motif_shifted_positions}" ]] || die "Motif scaffolding produced empty motif positions."
+    echo "design,cycle,motif_positions_1based,motif_ranges_1based,source_motif_ranges_1based" > "${motif_cycle_csv}"
+    echo ">>> ${run_tag}: motif scaffolding active (len=${#current_seq})"
+    echo ">>> ${run_tag}: motif placements ${motif_shifted_summary}"
+  elif [[ "${PARTIAL_REDESIGN}" -eq 1 ]]; then
+    current_seq="$(generate_partial_redesign_seed_seq "${PARTIAL_BINDER_SEQ}" "${PARTIAL_REDESIGN_RANGES}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "${PREDICTOR}")"
+    partial_redesigned_residues="${PARTIAL_REDESIGNED_RESIDUES}"
+    [[ -n "${current_seq}" ]] || die "Partial redesign seeding produced an empty initial sequence."
+    echo ">>> ${run_tag}: partial redesign active (len=${#current_seq}, ranges=${PARTIAL_REDESIGN_RANGES}, cycle_00 seeded in-range)"
+  else
+    current_seq="$(generate_random_binder_seq "${BINDER_MIN_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "${PREDICTOR}")"
+  fi
   echo "$current_seq" > "$state_seq"
 
   local cycle
@@ -1874,6 +2419,7 @@ run_one_design() {
     cstart="$(now_epoch)"
     echo ">>> ${run_tag} ${cycle_tag}: ${PREDICTOR} predict..."
     result="$(run_predictor_once "${PREDICTOR}" "${cycle_yaml}" "${current_seq}" "${qname}" "${cycle_dir}" "${target_msa_for_pred}" "design")"
+    result="$(normalize_predictor_result_line "${result}")"
     cend="$(now_epoch)"
     cdur="$(calc_duration "$cstart" "$cend")"
     echo "$(printf '%02d' "$cycle"),${cstart},${cend},${cdur}" >> "${timing_cycle_csv}"
@@ -1887,6 +2433,9 @@ run_one_design() {
 
     echo "$(printf '%02d' "$cycle"),${iptm},${plddt},${conf_val},${struct_val},${current_seq}" >> "${metrics_csv}"
     echo "${run_index},${cycle},${iptm},${plddt},${current_seq},${struct_val},${conf_val}" >> "${rows_csv}"
+    if [[ "${MOTIF_SCAFFOLDING}" -eq 1 ]]; then
+      echo "${run_index},$(printf '%02d' "$cycle"),${motif_shifted_positions},${motif_shifted_ranges},${motif_source_ranges}" >> "${motif_cycle_csv}"
+    fi
     echo ">>> ${run_tag} ${cycle_tag}: done in ${cdur}s (iPTM=${iptm})"
 
     export_cif "$run_tag" "$cycle" "${cycle_dir}/pred_min" "$iptm"
@@ -1901,7 +2450,7 @@ run_one_design() {
       else
         die "Missing model_0.cif/model_0.pdb in ${cycle_dir}/pred_min"
       fi
-      current_seq="$(run_ligandmpnn_redesign "${cycle_dir}" "${redesign_struct}" "$cycle")"
+      current_seq="$(run_ligandmpnn_redesign "${cycle_dir}" "${redesign_struct}" "$cycle" "${motif_fixed_residues}" "${partial_redesigned_residues}")"
       echo "$current_seq" > "$state_seq"
     fi
   done
@@ -1938,6 +2487,7 @@ run_post_task() {
   local t0 t1 dt result struct conf iptm plddt
   t0="$(now_epoch)"
   result="$(run_predictor_once "${predictor}" "${input_yaml}" "${binder_seq}" "${qname}" "${post_cycle_root}" "${target_msa_for_post}" "post")"
+  result="$(normalize_predictor_result_line "${result}")"
   t1="$(now_epoch)"
   dt="$(calc_duration "$t0" "$t1")"
 
@@ -2051,6 +2601,13 @@ TARGET_SEQ="$(extract_target_sequence_from_yaml "${TEMPLATE_YAML}" || true)"
 TARGET_CHAIN_ID="$(extract_target_chain_id_from_yaml "${TEMPLATE_YAML}" || true)"
 OPENFOLD_TARGET_MSA_PATH=""
 PEAK_RSS_MB=0
+PEAK_FOOTPRINT_MB=0
+PEAK_SYS_DELTA_MB=0
+PEAK_EFFECTIVE_MB=0
+MONITOR_PEAK_RSS_MB=0
+MONITOR_PEAK_FOOTPRINT_MB=0
+MONITOR_PEAK_SYS_DELTA_MB=0
+MONITOR_PEAK_EFFECTIVE_MB=0
 CAL_PRED_DONE=0
 MSA_CACHE_DIR="${EXPT_ROOT}/msa_cache"
 mkdir -p "${MSA_CACHE_DIR}"
@@ -2091,11 +2648,17 @@ else
       CAL_SEQ="$(generate_random_binder_seq "${BINDER_MAX_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "boltz")"
       make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${CAL_YAML}" "${CAL_SEQ}" ""
 
-      PEAK_MB_FILE="${EXPT_ROOT}/calibration_peak_rss_mb.txt"
+      PEAK_MB_FILE="${EXPT_ROOT}/calibration_peak_effective_mb.txt"
       if ! run_boltz_predict_monitored "${CAL_YAML}" "${CAL_DIR}/boltz" "${PEAK_MB_FILE}"; then
         die "Calibration Boltz run failed."
       fi
-      PEAK_RSS_MB="$(cat "${PEAK_MB_FILE}" 2>/dev/null || echo 0)"
+      PEAK_EFFECTIVE_MB="$(cat "${PEAK_MB_FILE}" 2>/dev/null || echo 0)"
+      PEAK_RSS_MB="${MONITOR_PEAK_RSS_MB:-0}"
+      PEAK_FOOTPRINT_MB="${MONITOR_PEAK_FOOTPRINT_MB:-0}"
+      PEAK_SYS_DELTA_MB="${MONITOR_PEAK_SYS_DELTA_MB:-0}"
+      [[ -n "${PEAK_EFFECTIVE_MB}" && "${PEAK_EFFECTIVE_MB}" != "0" ]] || PEAK_EFFECTIVE_MB="${MONITOR_PEAK_EFFECTIVE_MB:-0}"
+      echo "${PEAK_RSS_MB}" > "${EXPT_ROOT}/calibration_peak_rss_mb.txt"
+      write_calibration_memory_metrics "${EXPT_ROOT}/calibration_memory_metrics.csv"
 
       TARGET_MSA_DISC="$(find "${CAL_DIR}/boltz" -type f -name '*.csv' -path '*/msa/*' | head -n 1 || true)"
       if [[ -n "${TARGET_MSA_DISC}" ]]; then
@@ -2117,11 +2680,17 @@ else
       CAL_SEQ="$(generate_random_binder_seq "${BINDER_MAX_LEN}" "${BINDER_MAX_LEN}" "${BINDER_PERCENT_X}" "${HELIX_KILL}" "${NEGATIVE_HELIX_CONSTANT}" "${LOOP_KILL}" "intellifold")"
       make_yaml_with_binder_sequence "${TEMPLATE_YAML}" "${CAL_YAML}" "${CAL_SEQ}" ""
 
-      PEAK_MB_FILE="${EXPT_ROOT}/calibration_peak_rss_mb.txt"
+      PEAK_MB_FILE="${EXPT_ROOT}/calibration_peak_effective_mb.txt"
       if ! run_intellifold_predict_monitored "${CAL_YAML}" "${CAL_DIR}/intellifold" "${PEAK_MB_FILE}"; then
         die "Calibration IntelliFold run failed."
       fi
-      PEAK_RSS_MB="$(cat "${PEAK_MB_FILE}" 2>/dev/null || echo 0)"
+      PEAK_EFFECTIVE_MB="$(cat "${PEAK_MB_FILE}" 2>/dev/null || echo 0)"
+      PEAK_RSS_MB="${MONITOR_PEAK_RSS_MB:-0}"
+      PEAK_FOOTPRINT_MB="${MONITOR_PEAK_FOOTPRINT_MB:-0}"
+      PEAK_SYS_DELTA_MB="${MONITOR_PEAK_SYS_DELTA_MB:-0}"
+      [[ -n "${PEAK_EFFECTIVE_MB}" && "${PEAK_EFFECTIVE_MB}" != "0" ]] || PEAK_EFFECTIVE_MB="${MONITOR_PEAK_EFFECTIVE_MB:-0}"
+      echo "${PEAK_RSS_MB}" > "${EXPT_ROOT}/calibration_peak_rss_mb.txt"
+      write_calibration_memory_metrics "${EXPT_ROOT}/calibration_memory_metrics.csv"
 
       # IntelliFold requires a3m/csv for explicit MSA input; do not cache NPZ
       # as primary TARGET_MSA_PATH for IntelliFold runs.
@@ -2198,10 +2767,14 @@ PY
 )"
   fi
   SAFE_MB="$(floor_mul "${MEM_BUDGET_MB}" "${MEM_SAFETY}")"
-  if [[ -z "${PEAK_RSS_MB}" || "${PEAK_RSS_MB}" == "0" ]]; then
-    PEAK_RSS_MB=4096
+  if [[ -z "${PEAK_EFFECTIVE_MB}" || "${PEAK_EFFECTIVE_MB}" == "0" ]]; then
+    if [[ -n "${PEAK_RSS_MB}" && "${PEAK_RSS_MB}" != "0" ]]; then
+      PEAK_EFFECTIVE_MB="${PEAK_RSS_MB}"
+    else
+      PEAK_EFFECTIVE_MB=4096
+    fi
   fi
-  AUTO_MAX_BY_MEM="$(python3 - "${SAFE_MB}" "${PEAK_RSS_MB}" <<'PY'
+  AUTO_MAX_BY_MEM="$(python3 - "${SAFE_MB}" "${PEAK_EFFECTIVE_MB}" <<'PY'
 import sys
 safe=int(sys.argv[1]); peak=max(1,int(sys.argv[2]))
 print(max(1, safe//peak))
@@ -2249,9 +2822,28 @@ fi
 echo "Runs                    : ${N_RUNS}"
 echo "Optimization cycles     : ${N_CYCLES} (plus cycle_00 seed)"
 echo "MAX_PARALLEL            : ${MAX_PARALLEL}"
+if [[ "${MOTIF_SCAFFOLDING}" -eq 1 ]]; then
+  echo "Motif scaffolding       : on (Boltz-only design mode)"
+  echo "Motif positions         : ${MOTIF_POSITIONS}"
+  echo "Motif gap min           : ${MOTIF_GAP_BETWEEN}"
+  if [[ -n "${MOTIF_FIXED_POSITIONS}" ]]; then
+    echo "Motif fixed subset      : ${MOTIF_FIXED_POSITIONS}"
+  else
+    echo "Motif fixed subset      : (all motif residues)"
+  fi
+fi
+if [[ "${PARTIAL_REDESIGN}" -eq 1 ]]; then
+  echo "Partial redesign        : on"
+  echo "Redesign ranges         : ${PARTIAL_REDESIGN_RANGES}"
+  echo "Binder template length  : ${PARTIAL_BINDER_LEN}"
+  echo "Cycle_00 seed mode      : standard randomization in redesign ranges only"
+fi
 if [[ "${MAX_PARALLEL_USER}" == "auto" ]]; then
   echo "Auto parallel (mem/cpu) : ${AUTO_MAX_BY_MEM:-na}/${AUTO_MAX_BY_CPU:-na}"
   echo "Calibration peak RSS MB : ${PEAK_RSS_MB:-na}"
+  echo "Calibration peak phys MB: ${PEAK_FOOTPRINT_MB:-na}"
+  echo "Calibration peak sys MB : ${PEAK_SYS_DELTA_MB:-na}"
+  echo "Calibration effective MB: ${PEAK_EFFECTIVE_MB:-na}"
 fi
 echo "CPU only                : ${CPU_ONLY}"
 echo "MPNN redesign model     : ${LIGANDMPNN_MODEL_LABEL}"
@@ -2297,6 +2889,16 @@ for run_index in $(seq 1 "${N_RUNS}"); do
     tail -n +2 "${EXPT_ROOT}/${run_tag}/timing_run.csv" >> "${EXPT_ROOT}/summary_timing_design.csv"
   fi
 done
+
+if [[ "${MOTIF_SCAFFOLDING}" -eq 1 ]]; then
+  echo "design,cycle,motif_positions_1based,motif_ranges_1based,source_motif_ranges_1based" > "${EXPT_ROOT}/motif_positions_by_cycle.csv"
+  for run_index in $(seq 1 "${N_RUNS}"); do
+    run_tag="$(printf "run_%03d" "$run_index")"
+    if [[ -f "${EXPT_ROOT}/${run_tag}/motif_positions_by_cycle.csv" ]]; then
+      tail -n +2 "${EXPT_ROOT}/${run_tag}/motif_positions_by_cycle.csv" >> "${EXPT_ROOT}/motif_positions_by_cycle.csv"
+    fi
+  done
+fi
 
 if [[ "$(post_predictors_count)" -gt 0 ]]; then
   for post_pred in "${POST_PREDICTORS[@]}"; do
@@ -2353,6 +2955,9 @@ echo
 echo "Done."
 echo "Output root: ${EXPT_ROOT}"
 echo "Design summary: ${EXPT_ROOT}/summary_all_runs.csv"
+if [[ "${MOTIF_SCAFFOLDING}" -eq 1 ]]; then
+  echo "Motif positions: ${EXPT_ROOT}/motif_positions_by_cycle.csv"
+fi
 if [[ "$(post_predictors_count)" -gt 0 ]]; then
   for pp in "${POST_PREDICTORS[@]}"; do
     psafe="$(safe_predictor_name "$pp")"
