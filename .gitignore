@@ -30,6 +30,12 @@ summarize_campaign_iptm.py
 iProteinHunter_run_0402.sh
 iProteinHunter_run_copy.sh
 iProteinHunter_run_0802.sh
+make_af3_jsons_from_campaign.py
+iproteinhunter_run_multimer_copy.sh
+queue_after_dTF149.sh
+queue_hk1_no_post_dTF152_154.sh
+compare_iptm_across_dtf149_151.py
+compare_iptm_zscores_dtf149_151.py
 analyze_dssp_helixkill.py
 analyze_iptm_ppi_campaign_vs_af3.py
 plot_bench_parallel_combined.py
